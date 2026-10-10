@@ -1,0 +1,201 @@
+L6 AND L7 LAB SUMMARY
+======================
+
+PURPOSE IN AI PRODUCT DEVELOPMENT
+---------------------------------
+
+L6 - Explain Model Behavior
+L6 comes after model training and registration, and before exposing the model
+through a user-facing API. It checks what the model learned, how predictions
+are influenced, where performance differs across groups, and what limits should
+be communicated before the model is used.
+
+L7 - Call and Package the Prediction API
+L7 is the serving and integration stage. It exposes already-trained, registered
+models through API endpoints, checks valid and invalid inputs, and inspects how
+the service could be packaged. Docker was optional; the local Python API route
+was used. Neither lab proves deployment to AWS.
+
+
+L6: EXPLAIN MODEL BEHAVIOR
+==========================
+
+Step 1 - Register the fare model prerequisite
+Requirement: L6 needs a registered fare model, not just a run logged in MLflow.
+The fare model was missing from the registry, so both fare estimators were
+trained with one tuning trial each; the validation RMSE winner was registered.
+
+Command used:
+source .venv/bin/activate && python -m scripts.train_models --problem fare --n-trials 1
+
+Result: LightGBM was selected. `taxi-fare-predictor` version 1 was registered
+from run `e0f4777d18364bf4aa01f36f51a48eeb`.
+
+Step 2 - Generate fare explainability and fairness evidence
+Requirement: Load the registered fare model, evaluate its held-out test split,
+calculate subgroup metrics, calculate SHAP feature influence, and write outputs.
+
+Command used:
+source .venv/bin/activate && python -m scripts.responsible.run_analysis --problem fare
+
+Result: The script loaded `models:/taxi-fare-predictor/latest` and completed.
+It created or refreshed:
+- `artifacts/responsible/fare_shap_summary.png`
+- `artifacts/responsible/fare_fairness.json`
+- `docs/model_cards/fare.md`
+
+Step 3 - Interpret SHAP and fairness results
+Requirement: Read the global SHAP plot and model card. Explain model behavior
+without treating correlation or SHAP contribution as causation.
+
+Result: The model was `LGBMRegressor`, predicting `fare_amount`. The SHAP sample
+contained up to 2,000 test rows. The strongest features were:
+- `trip_distance`: mean absolute SHAP 6.8493
+- `trip_duration_min`: 3.7284
+- `PULocationID`: 0.6443
+- `DOLocationID`: 0.5209
+Higher distance and duration generally had positive contributions to predicted
+fare in the sample. SHAP describes model calculations relative to a baseline;
+it does not prove a real-world cause or explain an individual trip.
+
+The fairness report flagged RMSE differences for borough (ratio 8.12, worst
+Unknown), time of day (1.84, worst overnight), and airport status (2.54, worst
+airport). These are review signals, not proof of unfairness or causation.
+Overall fare test RMSE was 3.4717.
+
+Step 4 - Connect model-card guidance
+Requirement: Use the card's intended use, limitation, and monitoring guidance
+to bound how results are communicated.
+
+Result: The stated intended use is operational forecasting to support fleet
+positioning and rider fare estimates, not individual pricing or consequential
+decisions. The model uses one month of NYC Yellow Taxi data, so results may not
+generalize to other periods, sparsely represented areas, or other vehicle
+types. Drift and subgroup performance should be monitored.
+
+Additional registered-model check:
+The same analysis was also run for demand:
+source .venv/bin/activate && python -m scripts.responsible.run_analysis --problem demand
+
+It loaded `models:/taxi-demand-forecaster/latest`, refreshed
+`artifacts/responsible/demand_shap_summary.png`,
+`artifacts/responsible/demand_fairness.json`, and `docs/model_cards/demand.md`.
+Demand's leading SHAP features were `lag_1` (12.4169), `lag_168` (7.6835), and
+`lag_24` (4.2317). Overall demand test RMSE was 8.6187. Three dimensions were
+flagged: borough (ratio 211.13, worst Manhattan), time of day (2.70, worst
+evening), and airport status (4.74, worst airport).
+
+
+L7: CALL AND PACKAGE THE PREDICTION API
+======================================
+
+Step 1 - Check prerequisites and predict the runtime result
+Requirement: Confirm the environment, registry artifacts, and demand history
+before starting the API; predict what health, valid, and invalid responses
+should look like.
+
+Prerequisite command used:
+source .venv/bin/activate && python --version && for path in mlflow.db mlruns data/processed/demand_hourly.parquet; do if test -e "$path"; then printf 'PASS %s\n' "$path"; else printf 'FAIL %s\n' "$path"; fi; done
+
+Exact result:
+Python 3.11.7
+PASS mlflow.db
+PASS mlruns
+PASS data/processed/demand_hourly.parquet
+
+Model artifact load command used:
+source .venv/bin/activate && python -c 'from src.serving.registry import load_model; print("demand:", type(load_model("demand")).__name__); print("fare:", type(load_model("fare")).__name__)'
+
+Result:
+demand: LGBMRegressor
+fare: LGBMRegressor
+
+Docker check command: `docker version`
+Result: `bash: docker: command not found`, exit code 127. Docker Route A was
+unavailable, so the local Python Route B was used.
+
+Task 1 recorded the expected outcomes before API startup: health should return
+200 and show both models loaded; a valid fare request should return a numeric
+fare and `duration_estimated: true`; a fare request missing `trip_distance`
+should return 422. The first health curl was attempted before startup and failed
+with curl error 7 (could not connect). This was expected because the service was
+not yet running; later checks after startup succeeded.
+
+Step 2 - Start the API locally
+Requirement: Start the serving application without Docker.
+
+Command used:
+source .venv/bin/activate && python -m uvicorn src.serving.api:app --host 127.0.0.1 --port 8000
+
+Result: Uvicorn completed application startup and listened on
+`http://127.0.0.1:8000` (server process 61240).
+
+Step 3 - Check health and API documentation
+Requirement: Confirm readiness and inspect the API contract in Swagger.
+
+Health command used:
+curl -sS -i http://127.0.0.1:8000/health
+
+Result: HTTP 200 OK. Response:
+{"status":"ok","demand_model_loaded":true,"fare_model_loaded":true,"history_hours":744,"zones":253}
+Swagger was opened at `http://127.0.0.1:8000/docs`. It listed `POST
+/predict/fare` and `POST /predict/demand`, plus health, forecast, and explain
+endpoints.
+
+Step 4 - Test valid and invalid requests
+Requirement: Submit valid fare and demand requests and an invalid request; read
+the response fields and validation error.
+
+Valid fare command:
+curl -sS -i -X POST http://127.0.0.1:8000/predict/fare -H 'Content-Type: application/json' -d '{"trip_distance":3.4,"pu_location_id":132,"do_location_id":230,"passenger_count":1,"pickup_datetime":"2024-01-15T18:30:00"}'
+
+Exact result: HTTP 200 OK; `predicted_fare` was 20.16,
+`duration_estimated` was true, and request ID was
+`fe7bffe5-f234-437c-b134-a3ea871a593a`. Duration was estimated because the
+optional `trip_duration_min` was not supplied.
+
+Valid demand command:
+curl -sS -i -X POST http://127.0.0.1:8000/predict/demand -H 'Content-Type: application/json' -d '{"zone":132,"target_hour":"2024-02-01T00:00:00"}'
+
+Exact result: HTTP 200 OK; zone 132, target hour 2024-02-01T00:00:00,
+predicted pickups 142.76, request ID
+`46c8548f-aad1-4c3b-9b14-a7f4888792de`.
+
+Invalid fare command (missing `trip_distance`):
+curl -sS -i -X POST http://127.0.0.1:8000/predict/fare -H 'Content-Type: application/json' -d '{"pu_location_id":132,"do_location_id":230,"passenger_count":1,"pickup_datetime":"2024-01-15T18:30:00"}'
+
+Exact result: HTTP 422 Unprocessable Entity. The response identified
+`body.trip_distance` as missing with message `Field required`. FastAPI rejected
+the request before calling the model.
+
+Step 5 - Inspect the packaging boundary
+Requirement: Identify what the Docker image and Compose configuration package,
+without confusing local packaging with model training or cloud deployment.
+
+Files inspected: `docker/Dockerfile` and `docker/docker-compose.yml`.
+Result: The Dockerfile has builder and runtime stages. It installs dependencies
+in a Python 3.11 environment, then packages the application source/config/scripts,
+MLflow registry and artifacts, demand history, and Uvicorn startup command. It
+exposes port 8000. Compose defines API port 8000 and MLflow UI port 5000, mounts
+the registry database, `mlruns`, and API data, and checks API `/health`.
+
+Docker image build, Compose startup, and container health check were not run
+because Docker was unavailable. Docker packages the serving runtime; it does
+not train models. Local packaging is not proof of AWS deployment.
+
+Step 6 - Stop the local runtime
+Requirement: Stop the API after testing.
+
+Action and result: Ctrl+C was sent to the Uvicorn terminal. Uvicorn logged
+application shutdown complete and finished process 61240. The terminal exit
+code was 1 because the process was interrupted. The follow-up port check printed
+`No API listener on port 8000`, confirming the API stopped.
+
+
+OVERALL
+=======
+
+L6 checked and explained the registered models before API use. L7 then loaded
+those same registered models through the local API, proved the request and
+validation behavior, and inspected the packaging boundary. Core API checks
+passed; Docker packaging and AWS deployment remain outside the completed work.

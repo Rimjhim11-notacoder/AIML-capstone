@@ -1,0 +1,767 @@
+TAXI FORECASTING REPOSITORY FLOWCHART
+=====================================
+
+This map describes the repository as it exists locally. Source code and
+configuration define the product; data, models, reports, and databases under
+data/, artifacts/, mlruns/, mlflow.db, and predictions.db are generated or
+runtime state. .git/, .venv/, and cache folders are environment/tool internals
+and are not expanded here.
+
+END-TO-END AI PRODUCT FLOW
+--------------------------
+
+NYC TLC trip Parquet + zone lookup CSV
+    |
+    v
+[data/raw]
+    |  src/data/ingestion.py downloads or loads source records
+    v
+[Data preparation]
+    |  src/data/validation.py checks and cleans trips
+    |  src/data/aggregation.py creates pickup counts by zone and hour
+    v
+[Feature engineering]
+    |  src/features/fare_features.py creates one-row-per-trip fare inputs
+    |  src/features/demand_features.py creates time, lag, and rolling features
+    |  src/data/splits.py creates chronological train/validation/test partitions
+    v
+[data/processed + data/features]
+    |
+    +------------------------------+
+    |                              |
+    v                              v
+[Model development]           [Demand history]
+    |                              |
+    | scripts/train_models.py      | data/processed/demand_hourly.parquet
+    | src/models/tuning.py         |
+    | compares XGBoost/LightGBM    |
+    | by validation RMSE           |
+    v                              |
+[MLflow tracking and registry]     |
+    | mlflow.db + mlruns/           |
+    | registered demand/fare models|
+    +---------------+--------------+
+                    |
+          +---------+----------------------+
+          |                                |
+          v                                v
+[Responsible AI analysis]          [Prediction serving]
+ scripts/responsible/               src/serving/
+ src/responsible/                   FastAPI loads registered models
+ SHAP + subgroup metrics             and demand history
+ model cards/reports                 /health, /predict/*, /explain/*
+          |                                |
+          |                                +--> [Batch demand forecasting]
+          |                                       scripts/batch_forecast.py
+          |                                       predictions.db
+          v
+[Dashboard and communication]
+ dashboard/ combines API responses and stored reports for review
+          |
+          v
+[Monitoring and operations]
+ src/monitoring/ captures predictions, evaluates performance and drift
+          |
+          +--> review / alert / decision (not automatic retraining)
+                          |
+                          v
+[Optional retraining and delivery]
+ retraining/ quality gates --> buildspecs / scripts/aws/ --> ECR/ECS/SageMaker
+ infra/terraform/ defines optional AWS resources
+
+Tests in tests/ verify these components. Docker packages serving code, models,
+and history; it does not train models. Cloud templates are optional and do not
+prove a live deployment exists.
+
+COMPONENT OUTPUTS, SAVE LOCATIONS, AND ARTIFACT SOURCES
+======================================================
+
+Use this section to trace each major product artifact backward to the component
+that creates it and the data/model it was created from. Paths are relative to
+the repository root unless an S3 or container path is explicitly shown.
+
+1. Source acquisition
+  Component: src/data/ingestion.py, invoked by scripts/run_pipeline.py.
+  Produces: yellow_tripdata_YYYY-MM.parquet and taxi_zone_lookup.csv.
+  Saved at: data/raw/.
+  Source: NYC TLC monthly trip-data URL and zone lookup URL in
+  config/config.yaml. The source is public TLC data; the configured local
+  snapshot is January 2024.
+  Command for a fresh download (runs the full pipeline; documented, not the
+  command used for the cached local reruns):
+  source .venv/bin/activate && python -m scripts.run_pipeline --year 2024 --month 1
+  Command actually used with the already-present raw files:
+  source .venv/bin/activate && python -m scripts.run_pipeline --skip-download
+
+2. Cleaning and validation
+  Component: src/data/validation.py, called by scripts/run_pipeline.py.
+  Produces: trips_clean.parquet and a cleaning report used in the pipeline
+  summary.
+  Saved at: data/processed/trips_clean.parquet; report fields are saved inside
+  data/processed/pipeline_summary.json.
+  Source: raw TLC trip Parquet from data/raw/ plus cleaning bounds in
+  config/config.yaml.
+  Command used (pipeline invokes validation; no separate validation CLI):
+  source .venv/bin/activate && python -m scripts.run_pipeline --skip-download
+
+3. Demand aggregation
+  Component: src/data/aggregation.py, called by scripts/run_pipeline.py.
+  Produces: pickup_count by pickup zone and hour, including zero-count hours.
+  Saved at: data/processed/demand_hourly.parquet.
+  Source: cleaned trips in data/processed/trips_clean.parquet.
+  Command used (pipeline invokes aggregation; no separate aggregation CLI):
+  source .venv/bin/activate && python -m scripts.run_pipeline --skip-download
+
+4. Feature engineering
+  Component: src/features/fare_features.py,
+  src/features/demand_features.py, and src/features/calendar.py.
+  Produces: fare_features.parquet and demand_features.parquet.
+  Saved at: data/features/.
+  Source: fare features come from cleaned trip rows; demand features come from
+  hourly demand history. Calendar, lag, and rolling settings come from
+  config/config.yaml. Demand lag/rolling features use earlier history.
+  Command used (pipeline invokes both feature builders):
+  source .venv/bin/activate && python -m scripts.run_pipeline --skip-download
+
+5. Time-based data splitting
+  Component: src/data/splits.py, called by scripts/run_pipeline.py.
+  Produces: train, validation, and test files for both fare and demand.
+  Saved at: data/features/{fare,demand}_{train,val,test}.parquet.
+  Source: the matching feature table and split fractions/time columns in
+  config/config.yaml. These partitions are chronological, not random.
+  Command used (pipeline invokes the split function for each feature table):
+  source .venv/bin/activate && python -m scripts.run_pipeline --skip-download
+
+6. Pipeline summary
+  Component: scripts/run_pipeline.py.
+  Produces: JSON counts and cleaning summary for the completed pipeline run.
+  Saved at: data/processed/pipeline_summary.json.
+  Source: cleaning report and row counts from generated demand/fare feature
+  tables. It is written after the pipeline stages complete.
+  Command used:
+  source .venv/bin/activate && python -m scripts.run_pipeline --skip-download
+
+7. Model training and experiment tracking
+  Component: scripts/train_models.py -> src/models/train.py,
+  src/models/tuning.py, and src/utils/mlflow_utils.py.
+  Produces: estimator parameters, validation/test metrics, model files, run
+  metadata, and optional registered model versions.
+  Saved at: experiment/registry metadata in mlflow.db; run and model artifacts
+  in mlruns/. Model names are configured as taxi-demand-forecaster and
+  taxi-fare-predictor in config/config.yaml.
+  Source: the appropriate train/validation/test Parquet splits in
+  data/features/. Tuning/selection uses the configured validation metric
+  (RMSE by default); model artifacts are logged from the fitted winner.
+  Registration points to the winning MLflow model artifact; `--no-register`
+  leaves runs tracked but does not create a registry version.
+  Commands actually run:
+  source .venv/bin/activate && python -m scripts.train_models --problem fare --n-trials 1 --no-register
+  source .venv/bin/activate && python -m scripts.train_models --problem fare --n-trials 2 --no-register
+  source .venv/bin/activate && python -m scripts.train_models --problem demand --n-trials 2
+  source .venv/bin/activate && python -m scripts.train_models --problem fare --n-trials 1
+
+8. Training-time explanations and model cards
+  Component: src/models/shap_utils.py and src/models/model_card.py, called by
+  src/models/train.py after selecting the winner.
+  Produces: training-stage SHAP summary/bar plots and a model card per problem.
+  Saved at: artifacts/fare/ and artifacts/demand/.
+  Source: selected fitted model, training features, validation/test metrics,
+  feature importance, and project/data metadata.
+  Command: generated by the corresponding scripts.train_models invocation
+  above; there is no separate training-artifact command.
+
+9. Registered-model responsible analysis
+  Component: scripts/responsible/run_analysis.py with src/responsible/
+  explain.py, fairness.py, and model_card.py.
+  Produces: subgroup RMSE/MAE/MAPE results, global SHAP summary plots, and
+  responsible-analysis model cards.
+  Saved at: artifacts/responsible/{problem}_fairness.json,
+  artifacts/responsible/{problem}_shap_summary.png, and
+  docs/model_cards/{problem}.md.
+  Source: registered model resolved from MLflow, the matching held-out test
+  split in data/features/, and data/raw/taxi_zone_lookup.csv for borough/zone
+  labels. SHAP is calculated on a bounded sample; the fairness report uses
+  subgroup test results. These outputs describe the selected model/data run.
+  Commands actually run:
+  source .venv/bin/activate && python -m scripts.responsible.run_analysis --problem fare
+  source .venv/bin/activate && python -m scripts.responsible.run_analysis --problem demand
+
+10. Online API predictions
+   Component: src/serving/api.py, schemas.py, service.py, registry.py,
+   features.py, and predict.py.
+   Produces: JSON health, fare/demand predictions, forecasts, and explanations
+   returned to the HTTP caller; invalid inputs produce validation responses.
+   Saved at: predictions themselves are returned to the caller, not written to
+  a local prediction-results file by the API. Structured prediction-capture
+  events are emitted to the configured process log stream (stderr by default); hosted infrastructure
+   can transport them to S3 through Firehose.
+   Source: request JSON, registered MLflow model, serving feature logic, and
+   demand history at data/processed/demand_hourly.parquet. Request IDs and
+   model reference appear in the response/capture event.
+  API startup command actually run:
+  source .venv/bin/activate && python -m uvicorn src.serving.api:app --host 127.0.0.1 --port 8000
+  Example request commands actually run:
+  curl -sS -i -X POST http://127.0.0.1:8000/predict/fare -H 'Content-Type: application/json' -d '{"trip_distance":3.4,"pu_location_id":132,"do_location_id":230,"passenger_count":1,"pickup_datetime":"2024-01-15T18:30:00"}'
+  curl -sS -i -X POST http://127.0.0.1:8000/predict/demand -H 'Content-Type: application/json' -d '{"zone":132,"target_hour":"2024-02-01T00:00:00"}'
+
+11. Batch demand forecasting
+   Component: src/serving/batch.py, invoked by scripts/batch_forecast.py.
+   Produces: recursive predicted_pickups for each selected zone and forecast
+   hour; later forecast hours use earlier predictions as history.
+   Saved at: rows are appended to the demand_forecasts table in predictions.db
+   (path set by serving.batch_db_path in config/config.yaml).
+   Source: registered demand model, saved demand history, optional horizon and
+   zone arguments. The command prints a small summary to the terminal.
+  Command present in the workspace terminal history (completed successfully):
+  python -m scripts.batch_forecast --horizon 3
+
+12. Local drift demonstration
+   Component: scripts/monitoring/demo_drift_report.py and
+   src/monitoring/drift.py.
+   Produces: per-feature PSI/KS values and drift flags in JSON.
+   Saved at: artifacts/drift/{problem}_drift_metrics.json by default; the
+   output directory can be overridden. Dashboard reads this report.
+   Source: the problem's training split in data/features/ is the reference;
+   the local script samples it for current data and can deliberately shift
+   features for a demonstration. A synthetic drift report is not evidence of a
+   production incident.
+  Example generation command (available, not recorded as run here):
+  source .venv/bin/activate && python -m scripts.monitoring.demo_drift_report --problem all --mode drift
+
+13. Managed drift processing
+   Component: scripts/monitoring/run_drift_job.py, src/monitoring/capture.py,
+   src/monitoring/drift.py, and AWS monitoring configuration.
+   Produces: drift_metrics.json, optional Evidently HTML, and CloudWatch summary
+   metrics. A no-data run writes a no_data JSON status.
+   Saved at: job output directory (default /opt/ml/processing/output), uploaded
+   by SageMaker Processing to its configured S3 output; optional metrics go to
+   CloudWatch. Captures can be read from local files or an S3 prefix.
+   Source: training-split reference features and current API prediction-capture
+   records. PSI is the primary flag; KS is supporting distribution context.
+  Local dry-run command (available, not recorded as run here):
+  source .venv/bin/activate && python -m scripts.monitoring.run_drift_job --problem fare --current-dir ./captured --output-dir ./out --no-cloudwatch
+
+14. Dashboard
+   Component: dashboard/app.py, api_client.py, data.py, and sections.py.
+   Produces: rendered dashboard pages with live API results and stored evidence.
+   Saved at: no dashboard report is written by normal viewing; the app reads
+   reports from artifacts/responsible/, artifacts/drift/, docs/model_cards/,
+   and zone labels from data/raw/taxi_zone_lookup.csv.
+   Source: HTTP API responses plus local static artifact files. API and report
+   timestamps/model references may differ.
+  Local launch command (documented; dashboard was not launched here):
+  source .venv/bin/activate && API_BASE_URL=http://127.0.0.1:8000 python -m streamlit run dashboard/app.py --server.address 127.0.0.1 --server.port 8501
+
+15. Tests and CI
+   Component: tests/, pyproject.toml, scripts/ci_local.ps1, and buildspec.yml.
+   Produces: pass/fail output in the terminal or CI logs. The configured
+   CodeBuild coverage command additionally creates coverage.xml.
+   Saved at: coverage.xml in the CodeBuild workspace/artifact output when the
+   coverage buildspec runs; ordinary local pytest results are terminal output.
+   Source: test fixtures/synthetic data and the code under src/. Tests do not
+   require the production TLC files or AWS.
+  Local test command actually run:
+  source .venv/bin/activate && python -m pytest
+  CI coverage command defined in buildspec.yml (not run in CodeBuild here):
+  pytest --cov=src --cov-report=term-missing --cov-report=xml
+
+16. Container image and cloud deployment
+   Component: docker/Dockerfile, docker/docker-compose.yml, buildspecs,
+   scripts/aws/, and infra/terraform/.
+   Produces: API/dashboard container images, optional ECR image tags, and (when
+   explicitly deployed) AWS resources/service rollout.
+   Saved at: locally in the Docker image store, then in ECR for cloud delivery;
+   Terraform-managed state/resources are outside the source tree. The API image
+   includes code, dependencies, portable MLflow registry/artifacts, and demand
+   history. Compose development mounts can override these files.
+   Source: repository code/configuration, prepared MLflow registry and mlruns,
+   Parquet demand history, dashboard evidence, AWS parameters/credentials, and
+   successful quality gates. The repository configuration alone is not proof
+   that an image or AWS service was built/deployed.
+  Docker command documented for an available Docker installation (not run;
+  Docker CLI was unavailable):
+  docker compose -f docker/docker-compose.yml up --build
+
+17. Gated retraining
+   Component: retraining/pipeline.py, train_step.py, scripts/monitoring/
+   evaluate_models.py, and build_and_deploy.py.
+   Produces: candidate MLflow registry, training_summary.json,
+   evaluation.json, and—only if release conditions and deploy authorization
+   pass—a CodeBuild request for publishing/deployment.
+   Saved at: SageMaker Processing output directories and their configured S3
+   outputs; gated registry database and mlruns are uploaded to the deployment
+   artifact bucket. Evaluation JSON is read by the pipeline quality gate.
+   Source: prepared feature splits, seed/baseline MLflow registry, tuning
+   settings, RMSE thresholds, and explicit deployment authorization. Drift
+   alarms do not automatically retrain or deploy models.
+  Command used: none. The AWS/SageMaker retraining pipeline was inspected but
+  not submitted; execution requires configured AWS credentials, roles, images,
+  S3 inputs, and explicit deployment authorization.
+
+Artifact lineage summary:
+NYC TLC -> raw Parquet/CSV -> cleaned trips + hourly counts -> feature tables
+and chronological splits -> MLflow runs/models -> SHAP/fairness/model cards
+and API inference -> batch/database or monitoring reports -> dashboard/review.
+Each arrow is a data dependency; it does not imply every stage runs
+automatically.
+
+FOLDER -> FILE -> PURPOSE -> ROLE IN AI DEVELOPMENT
+===================================================
+
+ROOT: project intent and shared configuration
+----------------------------------------------
+README.md
+  -> Explains fare and demand questions, local setup, project areas, limitations
+  -> Product orientation and entry point into the lifecycle.
+
+pyproject.toml
+  -> Pytest, coverage, and Ruff configuration
+  -> Development quality gates and repeatable validation.
+
+requirements.txt
+  -> Core Python dependencies
+  -> Environment for data, models, API, and tests.
+requirements-dashboard.txt
+  -> Streamlit and dashboard-only dependencies
+  -> Optional presentation/decision interface.
+requirements-monitoring.txt
+  -> AWS and managed-monitoring dependencies
+  -> Optional hosted monitoring and retraining.
+
+.env.example
+  -> Template for local environment overrides
+  -> Configuration boundary; contains no real credentials.
+.gitignore
+  -> Excludes local data, models, databases, caches, and environment files
+  -> Prevents generated/private runtime state from becoming source code.
+.dockerignore
+  -> Excludes unnecessary files from the main image build context
+  -> Keeps serving images focused and smaller.
+
+buildspec.yml
+  -> CodeBuild lint/test and conditional API image publication/deployment
+  -> CI quality gate and optional delivery stage.
+buildspec-dashboard.yml
+  -> CodeBuild fetches dashboard evidence, builds/tests/publishes dashboard image
+  -> Optional dashboard delivery path.
+config/config.yaml
+  -> TLC period, paths, cleaning rules, splits, model settings, registry names,
+     MLflow experiments, serving history, and forecast defaults
+  -> Central controls used across pipeline, training, analysis, and serving.
+
+clients/python/
+----------------
+clients/python/taxi_client.py
+  -> Python HTTP client for health and prediction/forecast endpoints
+  -> Consumer integration with the serving product.
+clients/python/__init__.py
+  -> Package marker
+  -> Makes the client importable.
+
+config/
+-------
+config/config.yaml
+  -> Shared project configuration (also shown in root map)
+  -> Controls the data-to-model-to-serving pipeline.
+
+DATA AND GENERATED EVIDENCE
+---------------------------
+data/raw/
+  yellow_tripdata_2024-01.parquet
+    -> January 2024 TLC Yellow Taxi source snapshot
+    -> Raw input for ingestion and model dataset construction.
+  taxi_zone_lookup.csv
+    -> TLC zone ID labels and borough/service-zone lookup
+    -> Location interpretation for features, API, and subgroup analysis.
+
+data/processed/
+  trips_clean.parquet
+    -> Validated trip records
+    -> Clean base for fare features and demand aggregation.
+  demand_hourly.parquet
+    -> Dense pickup-zone/hour counts, including zero-count hours
+    -> Demand model history and serving-time forecast context.
+  pipeline_summary.json
+    -> Pipeline row counts and cleaning evidence
+    -> Data quality/audit evidence.
+
+data/features/
+  fare_features.parquet
+    -> Per-trip fare prediction features
+    -> Fare model input table.
+  fare_train.parquet, fare_val.parquet, fare_test.parquet
+    -> Chronological fare partitions
+    -> Train, validation selection, and final evaluation.
+  demand_features.parquet
+    -> Zone/hour calendar, lag, and rolling inputs
+    -> Demand model feature table.
+  demand_train.parquet, demand_val.parquet, demand_test.parquet
+    -> Chronological demand partitions
+    -> Train, validation selection, and final evaluation.
+
+artifacts/fare/
+  fare_shap_summary.png, fare_shap_bar.png
+    -> Training-stage explanation plots for the selected fare model
+    -> Model review and interpretation evidence.
+  fare_model_card.md
+    -> Generated fare model details and training metrics
+    -> Intended-use and limitation communication.
+artifacts/demand/
+  demand_shap_summary.png, demand_shap_bar.png
+    -> Training-stage explanation plots for the selected demand model
+    -> Model review and interpretation evidence.
+  demand_model_card.md
+    -> Generated demand model details and training metrics
+    -> Intended-use and limitation communication.
+artifacts/responsible/
+  fare_fairness.json, demand_fairness.json
+    -> Held-out subgroup metrics and flagged dimensions
+    -> Responsible-AI review evidence.
+  fare_shap_summary.png, demand_shap_summary.png
+    -> Global SHAP plots from responsible analysis
+    -> Explainability evidence; not causal explanations.
+
+notebooks/
+  01_explore_dataset.ipynb
+    -> Guided exploration of source, cleaning, features, splits, and evidence
+    -> Data understanding and analyst learning.
+
+MLflow local state at repository root
+  mlflow.db
+    -> SQLite experiment and Model Registry metadata
+    -> Experiment tracking and model version registration.
+  mlruns/
+    -> MLflow run artifacts and model files
+    -> Persisted parameters, metrics, models, and run evidence.
+  predictions.db
+    -> Local database used by batch demand forecasting
+    -> Serving/operations output, not model training input.
+
+SOURCE CODE: src/
+-----------------
+src/config.py
+  -> Loads YAML into cached typed configuration
+  -> Makes environment, paths, and model settings consistent.
+src/__init__.py
+  -> Package marker
+  -> Enables project module imports.
+
+src/data/
+  ingestion.py
+    -> Downloads/loads TLC trips and zone lookup
+    -> Source acquisition.
+  validation.py
+    -> Applies row validation and cleaning rules
+    -> Data quality and preparation.
+  aggregation.py
+    -> Aggregates pickups into zone/hour counts and fills empty hours
+    -> Demand target construction.
+  splits.py
+    -> Creates chronological train/validation/test splits
+    -> Leakage-aware model evaluation.
+  __init__.py
+    -> Package marker.
+
+src/features/
+  calendar.py
+    -> Calendar/time feature helpers
+    -> Shared feature engineering.
+  fare_features.py
+    -> Constructs fare prediction features from cleaned trips
+    -> Fare branch of feature engineering.
+  demand_features.py
+    -> Constructs demand lag, rolling, and calendar features
+    -> Demand branch of feature engineering.
+  __init__.py
+    -> Package marker.
+
+src/models/
+  common.py
+    -> Problem definitions, metrics, model creation, splits, registry names
+    -> Shared modeling contract and evaluation utilities.
+  tuning.py
+    -> Optuna tuning for XGBoost and LightGBM
+    -> Candidate optimization against validation data.
+  train.py
+    -> Fits candidates, logs MLflow runs, selects winner, writes artifacts,
+       and optionally registers the winner
+    -> Model development and promotion into the registry.
+  shap_utils.py
+    -> SHAP plots and importance helpers
+    -> Model interpretation.
+  model_card.py
+    -> Creates training model cards
+    -> Human-readable model documentation.
+  __init__.py
+    -> Package marker.
+
+src/serving/
+  api.py
+    -> FastAPI health, prediction, explanation, and forecast endpoints
+    -> Online inference interface.
+  schemas.py
+    -> Pydantic request/response validation models
+    -> API input contract and invalid-request handling.
+  service.py
+    -> Shared service loads models/history and serves predictions
+    -> Inference orchestration.
+  registry.py
+    -> Resolves and loads registered MLflow models
+    -> Connects model development artifacts to runtime.
+  predict.py
+    -> Prediction logic for demand and fare
+    -> Reusable inference calculations.
+  features.py
+    -> Runtime feature construction
+    -> Aligns API inputs with training features.
+  batch.py
+    -> Recursive multi-hour demand forecasts
+    -> Batch/forecast serving.
+  __init__.py
+    -> Package marker.
+
+src/responsible/
+  explain.py
+    -> Global SHAP importance and plot functions
+    -> Explainability evidence.
+  fairness.py
+    -> Borough/time/day/airport subgroup metric calculations
+    -> Responsible performance review.
+  model_card.py
+    -> Renders analysis model cards
+    -> Intended use, evaluation, fairness, and limitation communication.
+  __init__.py
+    -> Package marker.
+
+src/monitoring/
+  capture.py
+    -> Structures prediction events
+    -> Runtime observability input.
+  performance.py
+    -> Performance calculations for observed outcomes
+    -> Monitoring prediction quality.
+  drift.py
+    -> Distribution shift metrics and drift comparisons
+    -> Monitoring input changes; drift is not itself accuracy loss.
+  __init__.py
+    -> Package marker.
+
+src/aws/
+  s3.py
+    -> S3 artifact interactions
+    -> Cloud data/evidence transport.
+  sagemaker.py
+    -> SageMaker integration helpers
+    -> Optional managed training/processing operations.
+  __init__.py
+    -> Package marker.
+
+src/utils/
+  mlflow_utils.py
+    -> Configures tracking and starts runs
+    -> Shared experiment-tracking integration.
+  __init__.py
+    -> Package marker.
+
+EXECUTABLE WORKFLOWS: scripts/
+-------------------------------
+scripts/run_pipeline.py
+  -> Runs ingestion, cleaning, aggregation, feature generation, splits, summary
+  -> End-to-end data preparation.
+scripts/train_models.py
+  -> CLI for demand/fare training and optional registration
+  -> Model development entry point.
+scripts/batch_forecast.py
+  -> CLI for recursive demand forecast and persistence
+  -> Batch serving.
+scripts/build_explore_notebook.py
+  -> Generates exploration notebook
+  -> Learning material preparation.
+scripts/make_mlflow_portable.py
+  -> Rewrites MLflow artifact references for container paths
+  -> Container packaging preparation.
+scripts/ci_local.ps1
+  -> Local quality-gate helper
+  -> Developer/CI checks.
+scripts/__init__.py
+  -> Package marker.
+
+scripts/responsible/
+  run_analysis.py -> Loads registered models, evaluates test data, writes SHAP,
+                     fairness JSON, and model cards; responsible-AI workflow.
+scripts/monitoring/
+  demo_drift_report.py -> Generates local synthetic drift examples.
+  evaluate_models.py -> Compares retrained candidates to registered baselines.
+  run_drift_job.py -> Runs drift analysis in a job context.
+scripts/aws/
+  build_push.ps1 -> Build/push API image to ECR; cloud delivery.
+  build_push_dashboard.ps1 -> Build/push dashboard image; cloud delivery.
+  deploy.ps1 -> Deploy/update cloud services; operations.
+  destroy.ps1 -> Destroy configured Terraform resources; infrastructure lifecycle.
+  load_test.py -> Exercise API load; performance testing.
+  prepare_dashboard_staging.ps1 -> Stage dashboard report assets.
+  publish_fairness_evidence.ps1 -> Publish fairness reports to S3.
+  sagemaker_train.py -> Submit managed training.
+  submit_drift_job.py -> Submit managed drift processing.
+  upload_artifacts.ps1 -> Upload registry/model/history files for API image builds.
+  upload_dashboard_artifacts.ps1 -> Upload dashboard evidence assets.
+  upload_data_lake.py -> Upload raw/processed data artifacts.
+  verify_dashboard.py -> Smoke-check dashboard image.
+  verify_staging.py -> Verify a staging service.
+  __init__.py -> Package marker.
+
+DASHBOARD AND USER INTERACTION
+------------------------------
+dashboard/app.py
+  -> Streamlit application entry point
+  -> User-facing evidence and prediction interface.
+dashboard/api_client.py
+  -> HTTP calls from dashboard to API
+  -> Keeps inference at the serving API.
+dashboard/config.py
+  -> Dashboard settings and environment configuration
+  -> Runtime configuration.
+dashboard/data.py
+  -> Loads local model-card, fairness, drift, and other evidence
+  -> Reporting/data view layer.
+dashboard/sections.py
+  -> Dashboard view/section composition
+  -> Presentation layer.
+dashboard/__init__.py
+  -> Package marker.
+
+clients/python/taxi_client.py
+  -> Reusable external Python client
+  -> Programmatic API consumer.
+
+PACKAGING AND CLOUD INFRASTRUCTURE
+----------------------------------
+docker/Dockerfile
+  -> Multi-stage API image with Python dependencies, source, portable MLflow
+     registry/artifacts, and demand history; exposes 8000 and starts Uvicorn
+  -> Serving package, not model training.
+docker/Dockerfile.dashboard
+  -> Dashboard image
+  -> Dashboard delivery package.
+docker/docker-compose.yml
+  -> Local API and MLflow UI services, ports, mounts, and health check
+  -> Local integration/packaging.
+docker/Dockerfile.dashboard.dockerignore
+  -> Dashboard image build exclusions
+  -> Build-context control.
+
+infra/terraform/
+  main.tf -> Terraform providers and root composition; infrastructure entry.
+  variables.tf -> Configurable AWS names, sizes, flags, and inputs.
+  versions.tf -> Terraform/provider version constraints.
+  outputs.tf -> Useful created-resource outputs.
+  resource_group.tf -> Resource grouping and shared metadata.
+  datalake.tf -> Data/artifact storage resources.
+  staging.tfvars.example -> Example non-secret staging values.
+  dashboard.tf -> Dashboard service/image resources.
+  monitoring.tf -> Logs, events, drift monitoring, alerts, schedules.
+  cicd.tf -> CodeBuild/ECR/ECS build and delivery resources.
+  README.md -> Deployment instructions and operational constraints.
+These files declare optional AWS infrastructure; they do not establish that it
+has been deployed in an account.
+
+retraining/
+  pipeline.py
+    -> Defines SageMaker train/evaluate/quality-gate/release pipeline
+    -> Controlled model update lifecycle.
+  train_step.py
+    -> Trains candidates from prepared features and exports registry artifacts
+    -> Managed model development.
+  build_and_deploy.py
+    -> Publishes gated registry/artifacts and invokes delivery
+    -> Authorized release step.
+  __init__.py
+    -> Package marker.
+
+QUALITY AND AUTOMATION
+----------------------
+tests/conftest.py
+  -> Shared pytest fixtures
+  -> Test setup.
+tests/synthetic.py
+  -> Synthetic taxi data for offline tests
+  -> Repeatable validation without TLC downloads or cloud.
+tests/unit/
+  test_aggregation.py -> Demand aggregation behavior.
+  test_aws_s3.py -> S3 helper behavior.
+  test_aws_sagemaker.py -> SageMaker integration behavior.
+  test_features.py -> Feature creation behavior.
+  test_ingestion.py -> Data loading behavior.
+  test_load_test.py -> Load-test utility behavior.
+  test_mlflow_utils.py -> MLflow configuration/run helpers.
+  test_models.py -> Model metrics/training utilities.
+  test_monitoring.py -> Drift/performance behavior.
+  test_responsible.py -> SHAP/fairness/model-card behavior.
+  test_retraining.py -> Quality-gated retraining behavior.
+  test_serving.py -> Runtime model and prediction behavior.
+  test_splits.py -> Chronological split behavior.
+  test_validation.py -> Data-cleaning rules.
+  test_verify_staging.py -> Staging verification behavior.
+  __init__.py -> Package marker.
+tests/integration/
+  test_api.py -> HTTP endpoint integration.
+  test_client.py -> Python client integration.
+  test_pipeline.py -> Pipeline integration.
+  __init__.py -> Package marker.
+
+TEST / QUALITY CONFIGURATION
+  pyproject.toml -> pytest defaults, coverage threshold, Ruff rules.
+  buildspec.yml -> Cloud CI runs Ruff and coverage-enabled pytest before any
+                   conditional image build/deploy.
+  scripts/ci_local.ps1 -> Local CI workflow.
+
+DOCUMENTATION: docs/
+-------------------
+SETUP.md
+  -> Ordered local setup for environment, data, registry, API, batch, analysis,
+     dashboard, containers, and cloud; operational onboarding.
+API_EXAMPLES.md
+  -> Requests/responses for health, fare, demand, forecast, and explanation;
+     API contract and consumer guidance.
+ARCHITECTURE.md
+  -> Data/model/serving/monitoring architecture; system overview.
+PROJECT_ARCHITECTURE.md
+  -> Seven-stage lifecycle, AWS flow, release boundaries, and local route;
+     lifecycle/process guide.
+DATA_STATEMENT.md
+  -> Data scope and limitations; responsible data use.
+BUSINESS_REPORT.md
+  -> Historical business interpretation; decision communication.
+COST_OPTIMIZATION.md
+  -> Cloud cost guidance; operations planning.
+RECORDING_COMPANION.md
+  -> Recording-to-lab map and clarifications; learning path.
+STUDENT_AWS_IMAGE_ACCESS.md
+  -> Course image/AWS access guidance; environment onboarding.
+L2_FARE_METRICS_LAB.md -> Hand-calculated regression errors; model evaluation basics.
+L3_DATA_EXPLORATION_LAB.md -> Source lineage and data exploration.
+L4_PIPELINE_EVIDENCE_LAB.md -> Feature pipeline evidence and consistency checks.
+L5_MLFLOW_MODEL_TRACKING_LAB.md -> Candidate comparison and experiment tracking.
+L6_EXPLAINABILITY_LAB.md -> SHAP, fairness, and model-card review.
+L7_API_DOCKER_LAB.md -> Serving requests, validation, and local/container runtime.
+L8_CI_QUALITY_GATE_LAB.md -> Lint, tests, and CI quality gates.
+L9_AWS_INFRASTRUCTURE_LAB.md -> Cloud infrastructure workflow.
+L10_DRIFT_MONITORING_LAB.md -> Drift metrics and monitoring evidence.
+L11_FAIRNESS_REVIEW_LAB.md -> Subgroup performance and fairness review.
+L12_DASHBOARD_INSIGHT_LAB.md -> Dashboard evidence and stakeholder communication.
+model_cards/README.md -> Instructions to generate model cards.
+model_cards/demand.md, model_cards/fare.md -> Generated responsible-analysis cards.
+L1toL6steps.txt, L6L7.txt -> Learner-generated step summaries.
+API_Results.png, MLFlow evidence.png, RegisteredModel.png -> Visual evidence.
+aws arch.png, aws table.png -> Cloud architecture/table diagrams.
+data-lineage-route.png -> Data lineage diagram.
+
+OVERALL ROLE
+============
+
+The repository moves from raw TLC data to clean feature tables, trained and
+registered models, online/batch predictions, responsible-AI and monitoring
+evidence, and optional delivery or retraining. Tests and documentation support
+each stage. Dashboard, monitoring, explainability, and serving are connected
+support functions; the lifecycle is not a single automatic pipeline from alarm
+to deployment.

@@ -26,6 +26,12 @@ differs. The generated card currently shows registry version `n/a`; do not infer
 a numeric version from `latest`. Add a resolved version only when separately
 verified, and otherwise retain the identity gap.
 
+Result:
+
+- The `taxi-fare-predictor` model was not registered initially, so the bounded prerequisite command was run: `python -m scripts.train_models --problem fare --n-trials 1`.
+- LightGBM was selected and registered as `taxi-fare-predictor` version `1` from run `e0f4777d18364bf4aa01f36f51a48eeb`.
+- The generated card shows registry version `n/a`; the registry separately confirms version `1`. The analysis used the configured reference `models:/taxi-fare-predictor/latest`.
+
 ## Task 1: Generate Fare Analysis
 
 From the repository root:
@@ -35,6 +41,17 @@ From the repository root:
 ```
 
 Record the command result and the artifact paths it creates or refreshes.
+
+Result:
+
+- Command run successfully: `python -m scripts.responsible.run_analysis --problem fare`.
+- The analysis loaded `models:/taxi-fare-predictor/latest`, evaluated the fare test split, and reported three flagged subgroup dimensions.
+- Generated or refreshed artifacts:
+	- `artifacts/responsible/fare_shap_summary.png`
+	- `artifacts/responsible/fare_fairness.json`
+	- `docs/model_cards/fare.md`
+- To verify both registered problem models, also ran `python -m scripts.responsible.run_analysis --problem demand`. It loaded `models:/taxi-demand-forecaster/latest`, completed successfully, and reported three flagged subgroup dimensions.
+- Demand outputs refreshed: `artifacts/responsible/demand_shap_summary.png`, `artifacts/responsible/demand_fairness.json`, and `docs/model_cards/demand.md`.
 
 ## Task 2: Inspect Explainability Evidence
 
@@ -49,6 +66,14 @@ Follow the recorded global beeswarm reading order:
 3. Color represents the feature's low-to-high input value, not good/bad outcomes.
 4. Each dot is one sampled row for one feature; density and overlap show spread.
 5. Read numeric location IDs as labels, not geographic distance or ordered value.
+
+Result:
+
+- The analyzed model is `LGBMRegressor`, target `fare_amount`, using the registered fare model reference `models:/taxi-fare-predictor/latest` (verified registry version `1`).
+- Evidence is in `artifacts/responsible/fare_shap_summary.png`, `artifacts/responsible/fare_fairness.json`, and `docs/model_cards/fare.md`.
+- The SHAP ranking is led by `trip_distance` (mean absolute SHAP `6.8493`) and `trip_duration_min` (`3.7284`); next are `PULocationID` (`0.6443`) and `DOLocationID` (`0.5209`). Higher distance and duration values generally appear with positive SHAP contributions in the beeswarm, while lower values tend toward negative contributions. These are shifts relative to the model baseline, not causal effects.
+- Numeric location IDs are labels, not an ordered geographic scale. The card reports flagged RMSE disparity for borough (ratio `8.12`, worst `Unknown`), time of day (`1.84`, worst `overnight`), and airport status (`2.54`, worst `airport`). Day-type disparity (`1.32`) and the available holiday comparison (`1.00`) were not flagged at the `1.5` threshold.
+- The plot summarizes a sample of up to 2,000 test rows; it does not explain a particular trip.
 
 The global plot does not explain one named trip. Use a single-row explanation
 for that question. Correlated inputs can share attribution, and neither the plot
@@ -67,11 +92,22 @@ This suggests [plain-language interpretation]. The evidence does not prove
 SHAP describes how model inputs contribute to predictions. It does not prove
 that changing a feature causes the real-world outcome to change.
 
+Result:
+
+For the analyzed LightGBM fare model and its January 2024 test-data sample, `trip_distance` has the greatest global influence (mean absolute SHAP `6.8493`), and higher distance values generally have positive contributions to predicted fare. This suggests the model uses trip distance as a major input when estimating fares. The evidence does not prove that distance causes a real-world fare change or explain any individual trip.
+
 ## Task 4: Connect the Model Card
 
 Record one intended use, one limitation, and one monitoring or review action
 from the model card. Explain how each item changes the way the SHAP result
 should be communicated.
+
+Result:
+
+- Intended use: operational forecasting to support fleet positioning and rider fare estimates. Do not present this SHAP result as a basis for individual pricing decisions or decisions with legal or financial consequences for individuals.
+- Limitation: training data covers one month of NYC Yellow Taxi trips, so results may not generalize to other periods, sparsely represented boroughs, or other vehicle types. Describe the SHAP findings as specific to this model and sample.
+- Monitoring/review action: monitor drift and subgroup performance, including the borough, overnight, and airport groups flagged in the fairness report. The SHAP ranking alone does not establish fairness, causality, or production readiness.
+- Model-card test metrics: RMSE `3.4717`, MAE `0.8151`, MAPE `8.6912`, and R-squared `0.9550`.
 
 ## Completion Check
 

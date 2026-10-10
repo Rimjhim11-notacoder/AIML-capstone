@@ -1,0 +1,255 @@
+L2 TO L5 LAB STEPS AND COMMANDS
+================================
+
+Scope note: The requested filename is L1toL6steps.txt, but this summary covers
+L2 through L5, as requested. It does not claim that L1 or L6 tasks were done.
+Commands are shown in the shell form used in this macOS workspace unless noted.
+Some lab activities were manual inspection or notebook work and did not have a
+separate terminal command.
+
+L2: GUESS THE FARE AND FEEL THE METRICS
+======================================
+
+Task: Part A - Commit Fare Guesses
+Description: Recorded fare estimates and reasons for five trips before
+comparing them with the shared actual fares.
+Command used: None. This was completed manually in the lab table.
+Result: Guesses were recorded for trips A through E.
+
+Task: Part B - Calculate the Shared Errors
+Description: Calculated signed error (prediction minus actual), absolute error,
+squared error, mean signed error, MAE, MSE, and RMSE for five trips.
+Command used: The project metric helpers were used to verify the hand
+calculation:
+
+@'
+import numpy as np
+from src.models.common import mae, rmse
+
+actual = np.array([10, 15, 20, 30, 25], dtype=float)
+predicted = np.array([12, 13, 22, 40, 23], dtype=float)
+print("MAE:", mae(actual, predicted))
+print("RMSE:", rmse(actual, predicted))
+'@ | .\.venv\Scripts\python.exe -
+
+Result: MAE = $3.60; RMSE is approximately $4.82.
+
+Task: Part C - Interpret the Baseline
+Description: Explained that signed errors can cancel, MAE is the average
+absolute dollar error, and RMSE weights large misses more heavily. Identified
+Trip D as the largest contributor to RMSE and noted the need for subgroup checks.
+Command used: None. This was a written interpretation of Part B.
+
+Task: Part D - Extreme-Miss Comparison
+Description: Changed only Trip D's prediction from $40 to $60 and recalculated
+the metrics to show the effect of a larger miss.
+Command used: Re-ran the Part B verification code with the prediction array
+changed to [12, 13, 22, 60, 23].
+Result: MAE = $7.60; RMSE is approximately $13.53. Trip D's signed error is
+$30, absolute error is $30, and squared error is 900.
+
+Task: Exit Ticket
+Description: Summarized error cancellation, MAE, RMSE, and the need to report
+units, sample size, and relevant context.
+Command used: None. This was completed in writing.
+
+
+L3: EXPLORE THE DATA AND TRACE ITS LINEAGE
+=========================================
+
+Task: 1 - Read the Complete Route
+Description: Followed the data-lineage diagram from raw trips through cleaning,
+demand/fare feature branches, chronological splits, and downstream use. Kept
+the meanings of raw-trip, demand, and fare rows distinct.
+Command used: None. Diagram and lab documentation were inspected.
+Result: Demand rows represent pickup-zone/hour counts, including inserted zero
+counts; fare rows represent cleaned trips used to predict fare_amount.
+
+Task: 2 - Verify the Official Source
+Description: Identified the January 2024 NYC TLC Yellow Taxi Parquet source and
+the taxi-zone lookup CSV; treated zones as broad location labels, not GPS traces.
+Command used: None. The TLC source documentation and project configuration were
+inspected.
+
+Task: 3 - Connect Source to Code
+Description: Inspected config/config.yaml, src/data/ingestion.py, and
+scripts/run_pipeline.py to identify the configured period, URLs, filenames,
+local paths, and separation of ingestion from transformations.
+Command used: None. This was code/configuration inspection.
+Result: January 2024 data; raw files under data/raw, processed outputs under
+data/processed, and features under data/features.
+
+Task: 4 - Run and Open the Notebook
+Description: Used the already downloaded raw files to run the pipeline and
+opened notebooks/01_explore_dataset.ipynb with the project environment.
+Command used:
+
+source .venv/bin/activate && python -m scripts.run_pipeline --skip-download
+
+Fallback documented for missing raw files:
+
+source .venv/bin/activate && python -m scripts.run_pipeline
+
+Notebook rebuild command documented for intentional regeneration only:
+
+source .venv/bin/activate && python -m scripts.build_explore_notebook
+
+Result: The cached-input pipeline completed successfully. Notebook rebuilding
+was not needed.
+
+Task: 5 - Execute the Notebook in Order
+Description: Examined source/schema, cleaning, demand aggregation, demand and
+fare features, chronological splits, and artifact/lineage checks one notebook
+section at a time.
+Command used: No separate terminal command. Notebook cells were run in order.
+Result: Cleaning retained 2,727,349 rows from 2,964,624; demand contained
+188,232 zone-hour rows; demand features contained 145,728 rows after warm-up.
+
+Task: 6 - Reconcile Persisted Evidence
+Description: Compared notebook results with persisted Parquet files and the
+pipeline summary; checked row counts, unique zone-hour keys, and chronological
+train/validation/test splits.
+Command used: The pipeline command from Task 4 generated the evidence; checks
+were performed by inspecting persisted artifacts and notebook assertions.
+Result: Fare feature rows matched clean-trip rows (2,727,349); demand pickup
+counts summed to clean-trip rows; demand zone-hour keys were unique; both
+problems' splits were time ordered.
+
+Task: 7 - Present Three Findings
+Description: Recorded evidence and limitations for cleaning, hourly demand, and
+features/splits.
+Command used: None. Findings were written from notebook and artifact outputs.
+Result: The largest removal reason was passenger_count_out_of_range (167,879).
+The busiest pickup zone was 132. Findings were limited to the January 2024
+snapshot and project-defined cleaning/geography assumptions.
+
+
+L4: BUILD FEATURES AND DEMAND DATA
+==================================
+
+Task: 1 - Verify Inputs and Configuration
+Description: Confirmed the repository/environment, January 2024 raw files,
+cleaning limits, split fractions, demand lags, and rolling windows.
+Command used: Input/file checks and configuration inspection. The lab records
+these checks but does not give a single separate verification command. If raw
+files are missing, the documented build command is:
+
+source .venv/bin/activate && python -m scripts.run_pipeline --year 2024 --month 1
+
+Result: Raw trip Parquet and zone lookup files were present. The configured
+split was 80/10/10, with demand lags [1, 2, 3, 24, 168] and rolling windows
+[3, 24, 168].
+
+Task: 2 - Run the Pipeline
+Description: Reused local raw data, cleaned trips, aggregated hourly demand,
+built fare and demand features, created chronological splits, and wrote the
+summary JSON.
+Command used:
+
+source .venv/bin/activate && python -m scripts.run_pipeline --skip-download
+
+Result: Completed successfully with exit code 0 and wrote the Parquet outputs
+and data/processed/pipeline_summary.json.
+
+Task: 3 - Inspect Persisted Evidence
+Description: Inspected the pipeline summary, clean trips, hourly demand,
+feature tables, and six split files; recorded counts and date ranges.
+Command used: No separate command was recorded for each inspection; the
+artifacts were examined after Task 2.
+Result: 2,727,349 clean trips; 188,232 hourly demand rows; 145,728 demand
+feature rows; 2,727,349 fare feature rows. Chronological demand and fare splits
+were recorded in docs/L4_PIPELINE_EVIDENCE_LAB.md.
+
+Task: 4 - Run Consistency Checks
+Description: Checked that clean rows match the summary, fare rows match clean
+trips, hourly pickup counts sum to clean trips, zone-hour keys are unique, and
+feature counts match the summary.
+Command used: Checks were run against persisted artifacts and notebook/pipeline
+evidence; no separate standalone command was recorded in the lab.
+Result: All recorded consistency checks passed.
+
+Task: 5 - Explain the Result
+Description: Wrote the main finding, evidence paths, next action, and limits of
+the January 2024 local snapshot.
+Command used: None. This was a written evidence summary.
+Result: The persisted splits were selected as the source of truth for downstream
+modeling and evaluation.
+
+
+L5: TRAIN AND COMPARE MODELS WITH MLFLOW
+=======================================
+
+Task: 1 - Verify Training Inputs
+Description: Checked for fare train/validation/test feature files and the local
+MLflow tracking database.
+Command used in the lab instructions (PowerShell):
+
+Test-Path data\features\fare_train.parquet
+Test-Path data\features\fare_val.parquet
+Test-Path data\features\fare_test.parquet
+Test-Path mlflow.db
+
+A workspace shell check was also run for the training file:
+
+test -e "data/features/fare_train.parquet" && echo "Exists" || echo "Does not exist"
+
+Result: The fare split files existed. The database was created when model runs
+were logged.
+
+Task: 2 - Predict the Comparison
+Description: Before training, predicted XGBoost and selected RMSE as the
+comparison metric because lower RMSE is better and the project configuration
+uses selection_metric: rmse.
+Command used: None. This was the pre-training written prediction.
+
+Task: 3 - Train a Small Fare Comparison
+Description: Trained and logged XGBoost and LightGBM fare runs. The initial
+one-trial comparison was followed by a fresh two-trial-per-estimator run.
+Command used for the initial comparison:
+
+source .venv/bin/activate && python -m scripts.train_models --problem fare --n-trials 1 --no-register
+
+Command used for the later two-trial comparison:
+
+source .venv/bin/activate && python -m scripts.train_models --problem fare --n-trials 2 --no-register
+
+Result from the later run: XGBoost validation RMSE = 3.6194; LightGBM
+validation RMSE = 3.3749. LightGBM won. The runs were logged but not registered.
+
+Task: 4 - Inspect MLflow
+Description: Started/checked the local MLflow UI and compared run names,
+parameters, validation metrics, and artifacts in the fare experiment.
+Command used to start the UI:
+
+source .venv/bin/activate && mlflow ui --backend-store-uri sqlite:///mlflow.db --host 127.0.0.1 --port 5000
+
+Command used to check the UI response:
+
+curl -I http://127.0.0.1:5000
+
+Result: The UI returned HTTP 200 at http://127.0.0.1:5000. The experiment was
+taxi-fare-prediction. The one-trial run comparison recorded XGBoost RMSE 3.6444
+and LightGBM RMSE 3.3749; the later two-trial comparison also favored LightGBM.
+
+Task: 5 - Record the Result
+Description: Recorded the experiment/run IDs, validation RMSE, selected model,
+reason, and limitation. Later, ran demand with two trials per estimator and
+registered the selected demand model.
+Commands used:
+
+source .venv/bin/activate && python -m scripts.train_models --problem demand --n-trials 2
+
+The default enables registration. Fare was run separately with --no-register so
+that the demand model could be registered without registering fare.
+
+Result: Demand validation RMSE was 8.5248 for XGBoost and 8.4352 for LightGBM;
+LightGBM was selected. Model taxi-demand-forecaster version 1 was created with
+status READY and is linked to winning run ff06b7068554494b90401dbad18c8335.
+The fare two-trial run IDs were 0142eba81cad410fa036f23e32c90b68 (XGBoost) and
+84184976c2bb4aba9a84f23c066755f2 (LightGBM). The demand run IDs were
+b741b1238c77478784107fe9a64c4666 (XGBoost) and
+ff06b7068554494b90401dbad18c8335 (LightGBM).
+
+The comparison limitation: a small local run with two trials per estimator
+illustrates MLflow tracking and model selection; it is not exhaustive tuning or
+proof of production readiness.

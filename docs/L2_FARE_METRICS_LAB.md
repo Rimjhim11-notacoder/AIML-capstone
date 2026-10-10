@@ -18,11 +18,11 @@ Complete `Your guess` and `Reason` before viewing Part B.
 
 | Trip | Description | Your guess | Reason |
 | --- | --- | ---: | --- |
-| A | 1.2 miles, weekday morning, Midtown |  |  |
-| B | 2.5 miles, weekday afternoon, Manhattan |  |  |
-| C | 4 miles, evening, Manhattan to Brooklyn |  |  |
-| D | 8 miles, evening airport route |  |  |
-| E | 5.5 miles, late evening, Queens |  |  |
+| A | 1.2 miles, weekday morning, Midtown | $12 | Morning Midtown short trip, usually a modest fare with a small base charge. |
+| B | 2.5 miles, weekday afternoon, Manhattan | $15 | Midday Manhattan trip of a few miles, likely a typical city fare. |
+| C | 4 miles, evening, Manhattan to Brooklyn | $22 | Longer evening cross-borough trip, so fare should be higher than a simple Manhattan ride. |
+| D | 8 miles, evening airport route | $40 | Airport route is longer and usually more expensive, especially at night. |
+| E | 5.5 miles, late evening, Queens | $23 | Late evening and a longer distance would push the fare above a short trip but not as high as an airport ride. |
 
 ## Part B: Calculate the Shared Errors
 
@@ -34,32 +34,31 @@ Error = prediction - actual
 
 | Trip | Actual fare | Shared prediction | Error | Absolute error | Squared error |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| A | $10 | $12 |  |  |  |
-| B | $15 | $13 |  |  |  |
-| C | $20 | $22 |  |  |  |
-| D | $30 | $40 |  |  |  |
-| E | $25 | $23 |  |  |  |
+| A | $10 | $12 | +2 | 2 | 4 |
+| B | $15 | $13 | -2 | 2 | 4 |
+| C | $20 | $22 | +2 | 2 | 4 |
+| D | $30 | $40 | +10 | 10 | 100 |
+| E | $25 | $23 | -2 | 2 | 4 |
 
 Complete these calculations:
 
 ```text
-Sum of signed errors =
-Mean signed error =
+Sum of signed errors = 10
+Mean signed error = 2.00
 
-MAE = sum of absolute errors / 5 =
+MAE = sum of absolute errors / 5 = (2 + 2 + 2 + 10 + 2) / 5 = 18 / 5 = 3.60
 
-Mean squared error = sum of squared errors / 5 =
-RMSE = square root of mean squared error =
+Mean squared error = sum of squared errors / 5 = (4 + 4 + 4 + 100 + 4) / 5 = 116 / 5 = 23.20
+RMSE = square root of mean squared error = sqrt(23.20) ≈ 4.82
 ```
 
 ## Part C: Interpret the Baseline
 
-1. What information can the mean signed error hide?
-2. What does MAE mean for these five predictions?
-3. Why is RMSE larger than MAE here?
-4. Which trip contributes most to RMSE, and why?
-5. Which operational groups should be checked separately before drawing a
-   broad conclusion?
+1. The mean signed error can hide information because positive and negative errors cancel out, so a model can look unbiased even when some predictions are far off.
+2. MAE means that the average absolute prediction error across these five trips is $3.60.
+3. RMSE is larger than MAE because it squares each error before averaging, which gives extra weight to large mistakes.
+4. Trip D contributes most to RMSE because its error is $10, and its squared error is 100, which is much larger than the other trips.
+5. We should check separate operational groups such as airport trips, time of day, and borough or route type before drawing a broad conclusion.
 
 ### Verify After Calculating
 
@@ -89,15 +88,15 @@ Change only trip D's prediction from `$40` to `$60`.
 
 | Metric | Baseline | Extreme case | Increase |
 | --- | ---: | ---: | ---: |
-| MAE |  |  |  |
-| RMSE |  |  |  |
+| MAE | 3.60 | 7.60 | 4.00 |
+| RMSE | 4.82 | 13.53 | 8.71 |
 
 Record the changed trip-D values:
 
 ```text
-Signed error =
-Absolute error =
-Squared error =
+Signed error = 30
+Absolute error = 30
+Squared error = 900
 ```
 
 After calculating the extreme case, rerun the verification block with only the
@@ -108,10 +107,10 @@ and the other four predictions must stay unchanged.
 
 Complete each statement:
 
-1. Mean signed error can mislead because...
-2. MAE means...
-3. RMSE is larger in the baseline because...
-4. MAE and RMSE should be reported with...
+1. Mean signed error can mislead because positive and negative errors cancel each other out.
+2. MAE means the average absolute difference between predicted and actual fares in dollars.
+3. RMSE is larger in the baseline because it gives greater weight to larger errors by squaring them.
+4. MAE and RMSE should be reported with dollar units and enough context, including sample size and relevant subgroup breakdowns.
 
 ## Completion Check
 

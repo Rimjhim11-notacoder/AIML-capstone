@@ -28,6 +28,14 @@ from src.utils.mlflow_utils import configure_mlflow, start_run
 
 logger = logging.getLogger(__name__)
 
+_TRUSTED_SKOPS_TYPES = [
+    "xgboost.core.Booster",
+    "xgboost.sklearn.XGBRegressor",
+    "lightgbm.basic.Booster",
+    "lightgbm.sklearn.LGBMRegressor",
+    "collections.OrderedDict",
+]
+
 # Metrics where a larger value is better (others: smaller is better).
 _HIGHER_IS_BETTER = {"r2"}
 
@@ -101,7 +109,11 @@ def train_problem(
             mlflow.log_params(best_params)
             mlflow.log_metrics({f"val_{k}": v for k, v in val_metrics.items()})
             mlflow.log_metrics({f"test_{k}": v for k, v in test_metrics.items()})
-            mlflow.sklearn.log_model(model, artifact_path="model")
+            mlflow.sklearn.log_model(
+                model,
+                artifact_path="model",
+                skops_trusted_types=_TRUSTED_SKOPS_TYPES,
+            )
             run_id = run.info.run_id
 
         logger.info(
